@@ -20,6 +20,8 @@ from utils import (
     set_random_seed,
     seed_worker,
     get_classifier,
+    classification_metrics,
+    resolve_device,
 )
 
 
@@ -152,6 +154,7 @@ def evaluate(
     val_loss = 0.0
     val_true = []
     val_pred = []
+    val_proba = []
 
     with torch.no_grad():
         for batch in val_loader:
@@ -159,24 +162,33 @@ def evaluate(
             preds = model(batch.x, torch.bincount(batch.batch))
             loss = criterion(preds["bag_logits"], batch.y)
             val_loss += loss.item()
+            proba = torch.softmax(preds["bag_logits"], dim=-1)
             val_true.extend(batch.y.detach().cpu().numpy())
-            val_pred.extend(
-                torch.argmax(torch.softmax(preds["bag_logits"], dim=-1), dim=1)
-                .detach()
-                .cpu()
-                .numpy()
-            )
+            val_pred.extend(torch.argmax(proba, dim=1).detach().cpu().numpy())
+            val_proba.append(proba.detach().cpu().numpy())
 
     mean_val_loss = val_loss / len(val_loader)
     val_f1 = f1_score(y_true=val_true, y_pred=val_pred, average="macro")
 
-    return {"val_loss": mean_val_loss, "val_f1": val_f1}
+    # Tables D.10-D.12 of the paper report balanced accuracy, AUROC and AUPRC,
+    # none of which the original script computed.
+    extra = classification_metrics(
+        val_true, val_pred, np.concatenate(val_proba, axis=0), model.num_classes
+    )
+
+    return {
+        "val_loss": mean_val_loss,
+        "val_f1": val_f1,
+        "val_balanced_acc": extra["balanced_accuracy"],
+        "val_auroc": extra["auroc"],
+        "val_auprc": extra["auprc"],
+    }
 
 
 def main():
     args = parse_arguments()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = resolve_device()
     print(f"Using device {device}")
 
     g = torch.Generator()
@@ -370,6 +382,9 @@ def main():
     test_metrics = {
         "test_loss": [],
         "test_f1": [],
+        "test_balanced_acc": [],
+        "test_auroc": [],
+        "test_auprc": [],
     }
 
     for fold in range(args.n_splits):
@@ -382,30 +397,32 @@ def main():
             model=model,
         )
 
-        mean_test_loss = test_log_dict["val_loss"]
-        test_f1 = test_log_dict["val_f1"]
-
         print(
-            f"Fold {fold+1} Test Results: Loss: {mean_test_loss:.4f}, F1 Score: {test_f1:.4f}"
+            f"Fold {fold+1} Test: loss {test_log_dict['val_loss']:.4f}  "
+            f"F1 {test_log_dict['val_f1']:.4f}  "
+            f"balAcc {test_log_dict['val_balanced_acc']:.4f}  "
+            f"AUROC {test_log_dict['val_auroc']:.4f}  "
+            f"AUPRC {test_log_dict['val_auprc']:.4f}"
         )
-        test_metrics["test_loss"].append(mean_test_loss)
-        test_metrics["test_f1"].append(test_f1)
+        test_metrics["test_loss"].append(test_log_dict["val_loss"])
+        test_metrics["test_f1"].append(test_log_dict["val_f1"])
+        test_metrics["test_balanced_acc"].append(test_log_dict["val_balanced_acc"])
+        test_metrics["test_auroc"].append(test_log_dict["val_auroc"])
+        test_metrics["test_auprc"].append(test_log_dict["val_auprc"])
 
-    test_loss_mean = np.mean(test_metrics["test_loss"])
-    test_loss_std = np.std(test_metrics["test_loss"])
-    test_f1_mean = np.mean(test_metrics["test_f1"])
-    test_f1_std = np.std(test_metrics["test_f1"])
-
-    print(
-        f"Test Results: Loss: {test_loss_mean:.4f} ± {test_loss_std:.4f}, F1 Score: {test_f1_mean:.4f} ± {test_f1_std:.4f}"
-    )
-
-    results = {
-        "test_loss": {"mean": test_loss_mean, "std": test_loss_std},
-        "test_f1": {"mean": test_f1_mean, "std": test_f1_std},
-        "best_val_config": best_f1_config,
-        "saved_model_paths": saved_model_paths,
-    }
+    results = {"best_val_config": best_f1_config, "saved_model_paths": saved_model_paths}
+    print("\n===== TEST SUMMARY =====")
+    for key, label, scale in [
+        ("test_f1", "Macro F1", 100),
+        ("test_balanced_acc", "Balanced accuracy", 100),
+        ("test_auroc", "AUROC", 100),
+        ("test_auprc", "AUPRC", 100),
+        ("test_loss", "Loss", 1),
+    ]:
+        v = np.array(test_metrics[key]) * scale
+        results[key] = {"mean": float(v.mean()), "std": float(v.std())}
+        print(f"  {label:<18} {v.mean():7.2f} +/- {v.std():.2f}")
+    print("========================\n")
 
     os.makedirs(args.save_dir, exist_ok=True)
     results_path = os.path.join(args.save_dir, "test_metrics.json")

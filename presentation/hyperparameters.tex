@@ -1,0 +1,704 @@
+% =====================================================================
+%  GrapHist: Complete Hyperparameter Reference
+%  Compile: pdflatex hyperparameters.tex   (run twice for the ToC)
+% =====================================================================
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=2.1cm]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage[colorlinks=true,linkcolor=haem,urlcolor=haem]{hyperref}
+
+\definecolor{haem}{RGB}{74,56,145}
+\definecolor{eosin}{RGB}{176,58,91}
+\definecolor{inkgrey}{RGB}{90,85,100}
+\definecolor{rowbg}{RGB}{244,242,249}
+
+\titleformat{\section}{\normalfont\Large\bfseries\color{haem}}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\normalfont\large\bfseries}{\thesubsection}{0.6em}{}
+\titlespacing*{\section}{0pt}{16pt}{7pt}
+\titlespacing*{\subsection}{0pt}{12pt}{5pt}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\color{inkgrey} GrapHist: Complete Hyperparameter Reference}
+\fancyhead[R]{\small\color{inkgrey}\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\newcommand{\req}{\textcolor{eosin}{\textbf{required}}}
+\newcommand{\dead}{\textcolor{eosin}{\textbf{dead}}}
+\newcommand{\hc}{\textcolor{haem}{\textbf{hardcoded}}}
+
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.12}
+
+\begin{document}
+
+\begin{center}
+  {\LARGE\bfseries\color{haem} GrapHist: Complete Hyperparameter Reference}\\[5pt]
+  {\large Every parameter in the paper and in the released code}\\[8pt]
+  {\small Group 1 \quad$\cdot$\quad Aadith Krishna, Aditya Santosh, Arjungopal Anilkumar}
+\end{center}
+
+\vspace{4pt}
+\hrule
+\vspace{10pt}
+
+\noindent\textbf{How to read this document.} Values marked \req{} have no default
+and must be supplied on the command line. Values marked \hc{} are fixed constants
+inside the source and cannot be changed without editing the code. Values marked
+\dead{} are parsed and passed through the call chain but never reach the model;
+they are listed in Section~\ref{sec:dead} with the evidence. Where the paper and
+the code disagree, both are given.
+
+\vspace{6pt}
+{\small\tableofcontents}
+
+\newpage
+% =====================================================================
+\section{Data preprocessing pipeline}
+
+The four scripts in \texttt{src/data/} convert whole slide images into the
+\texttt{.pt} cell graphs. Stages 01--04 use the \texttt{fire} CLI, so arguments
+are positional-or-keyword Python parameters rather than \texttt{argparse} flags.
+
+\subsection{Stage 00: tiling (paper only, no script released)}
+
+\begin{longtable}{@{}p{4.6cm}p{3.4cm}p{7.6cm}@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Note} \\
+\midrule \endhead
+Tissue segmentation & per paper ref.~[43] & separates tissue from slide background \\
+Magnification & 20$\times$ & standard digital pathology convention \\
+Resolution & 0.5 \textmu m/pixel & matches \texttt{img\_mpp} in stage 02 \\
+Tile size & $224 \times 224$ px & \\
+Tile overlap & none & non-overlapping \\
+Corpus & 998 WSIs $\rightarrow$ 11{,}149{,}500 tiles & TCGA-BRCA \\
+\bottomrule
+\end{longtable}
+
+\subsection{Stage 01: cell segmentation}
+\noindent\texttt{src/data/01\_cell\_segmentation.py}
+
+\begin{longtable}{@{}p{4.6cm}p{3.4cm}p{7.6cm}@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Note} \\
+\midrule \endhead
+\texttt{input\_path} & \req & directory of patient folders of patch images \\
+\texttt{output\_path} & \req & \\
+Model & StarDist2D & nuclei instance segmentation, U-Net backbone \\
+Pretrained weights & \texttt{2D\_versatile\_he} & H\&E-specific \\
+\texttt{scale} & 1 & \hc, tuned for 20$\times$ input \\
+\texttt{nms\_thresh} & 0.01 & \hc, non-maximum suppression \\
+\texttt{prob\_thresh} & 0.25 & \hc, detection probability floor \\
+Device & GPU & 0.127 s/patch (paper Table C.8) \\
+\bottomrule
+\end{longtable}
+
+\subsection{Stage 02: cell feature extraction}
+\noindent\texttt{src/data/02\_cell\_feature\_extraction.py}
+
+\begin{longtable}{@{}p{4.6cm}p{3.4cm}p{7.6cm}@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Note} \\
+\midrule \endhead
+\texttt{input\_path} & \req & patch images \\
+\texttt{seg\_path} & \req & stage 01 output \\
+\texttt{output\_path} & \req & \\
+\texttt{n\_jobs} & 24 & CPU parallelism \\
+\texttt{img\_mpp} & 0.50 & \hc{} microns per pixel; fixes the physical scale \\
+GLCM \texttt{distances} & \texttt{[1]} & \hc{} co-occurrence offset \\
+GLCM \texttt{angles} & $0, \pi/4, \pi/2, 3\pi/4$ & \hc{} four directions \\
+GLCM \texttt{levels} & 256 & \hc \\
+GLCM \texttt{symmetric} & \texttt{True} & \hc \\
+GLCM \texttt{normed} & \texttt{True} & \hc \\
+Fourier \texttt{n} & \texttt{[20, 30]} & \hc{} two rfft lengths \\
+Fourier \texttt{workers} & 3 & \hc \\
+Device & CPU & 0.369 s/patch (paper Table C.8) \\
+\bottomrule
+\end{longtable}
+
+\paragraph{The 96 node features, decomposed.} Verified by tracing the extraction
+code rather than inferring from the paper's Table B.6.
+
+\begin{longtable}{@{}p{3.3cm}r p{11.0cm}@{}}
+\toprule
+\textbf{Group} & \textbf{Count} & \textbf{Composition} \\
+\midrule \endhead
+Colour intensity & 24 & min, max, mean, std, skew, kurtosis over R, G, B (18) plus the same six over greyscale (6) \\
+Morphology & 11 & detection probability, orientation, major axis length, minor axis length, eccentricity, area, perimeter, circularity, elongation, solidity, extent \\
+GLCM texture & 36 & 6 properties (ASM, contrast, correlation, dissimilarity, energy, homogeneity) $\times$ 6 statistics (mean, std, skew, kurtosis, min, max) \\
+Fourier shape & 25 & \texttt{rfft} of the centroid-distance signature at $n=20$ and $n=30$ gives $20/2+1=11$ and $30/2+1=16$ coefficients; each is divided by its DC term, which is then dropped, leaving $10 + 15$ \\
+\midrule
+\textbf{Total} & \textbf{96} & matches the paper's stated node feature dimension \\
+\bottomrule
+\end{longtable}
+
+\subsection{Stage 03: graph construction}
+\noindent\texttt{src/data/03\_graph\_construction.py}
+
+\begin{longtable}{@{}p{4.6cm}p{3.4cm}p{7.6cm}@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Note} \\
+\midrule \endhead
+\texttt{feat\_path} & \req & stage 02 output \\
+\texttt{output\_path} & \req & \\
+\texttt{dist\_threshold} & 100 & microns; edges longer than this are removed \\
+Topology & Delaunay triangulation & over \texttt{center\_X}, \texttt{center\_Y} \\
+Edge weight & Euclidean distance & in microns, range $(0, 100)$ \\
+Edge storage & one-directional & every \texttt{edge\_index} has \texttt{src < dst} \\
+Device & CPU & 0.009 s/patch (paper Table C.8) \\
+\bottomrule
+\end{longtable}
+
+\subsection{Stage 04: serialise to \texttt{.pt}}
+\noindent\texttt{src/data/04\_save\_dataset.py}
+
+\begin{longtable}{@{}p{4.6cm}p{3.4cm}p{7.6cm}@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Note} \\
+\midrule \endhead
+\texttt{edge\_path} & \req & stage 03 output \\
+\texttt{clinical\_data\_path} & \req & labels and metadata \\
+\texttt{output\_path} & \req & one \texttt{.pt} per tile \\
+\bottomrule
+\end{longtable}
+
+\newpage
+% =====================================================================
+\section{Model architecture}
+
+\subsection{ACM-GIN block}
+
+\begin{longtable}{@{}p{4.6cm}p{4.2cm}p{6.8cm}@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Note} \\
+\midrule \endhead
+Random-walk matrix & $A_{rw} = D^{-1}A$ & $D$ is the \emph{weighted} degree matrix \\
+Low-pass channel & $A_L = (I + A_{rw})/2$ & \\
+High-pass channel & $A_H = (I - A_{rw})/2$ & \\
+Identity channel & $A_I = I$ & \\
+Temperature \texttt{T} & 3.0 & \hc{} default in \texttt{ACM\_GIN.\_\_init\_\_} \\
+Aggregation & \texttt{aggr="add"} & \hc{} in \texttt{kwargs.setdefault} \\
+Message function & \texttt{edge\_weight * x\_j} & \\
+Degree normalisation & \texttt{1 / weighted\_degree} & guarded by \texttt{masked\_fill\_(deg\_inv == inf, 0)} \\
+Channel importance & \texttt{sigmoid(Linear($d$, 1))} & one per channel \\
+Mixing matrix & \texttt{Linear(3, 3)} & applied to the three scores divided by \texttt{T} \\
+Final combination & \texttt{softmax}, convex sum & per node, over the three channels \\
+Per-channel MLP & \texttt{Linear(in, hid)} $\rightarrow$ act $\rightarrow$ \texttt{Linear(hid, out)} $\rightarrow$ act & \texttt{BatchNorm1d} inserted after each \texttt{Linear} only if \texttt{batchnorm=True} \\
+\bottomrule
+\end{longtable}
+
+\subsection{Encoder, decoder and expressivity additions}
+
+\begin{longtable}{@{}p{4.6cm}p{4.2cm}p{6.8cm}@{}}
+\toprule
+\textbf{Component} & \textbf{Value} & \textbf{Note} \\
+\midrule \endhead
+Encoder type & \texttt{acm\_gin} & \\
+Encoder depth & 5 & paper: chosen following Hou et al.\ for large datasets \\
+Decoder type & \texttt{acm\_gin} & \\
+Decoder depth & 1 & \hc{} as \texttt{num\_layers=1} in \texttt{PreModel} \\
+Embedding dim $d$ & 512 & released checkpoint; searched over $\{512, 768, 1024\}$ \\
+Mask token & \texttt{nn.Parameter(zeros(1, in\_dim))} & learnable \\
+Jumping knowledge & \texttt{concat\_hidden=True} & concatenates all layer outputs \\
+Encoder$\rightarrow$decoder & \texttt{Linear($d \times$num\_layers, $d$, bias=False)} & with JK; \texttt{Linear($d$, $d$, bias=False)} without \\
+Virtual node features & zeros & \\
+Virtual node edge weight & \textbf{22.5} & \hc. Paper states ``the mean of all edge weights in the pre-training dataset''. See Section~\ref{sec:vn}. \\
+Parameter count & 9.50M / 21.12M / 37.34M & at $d = 512$ / 768 / 1024 \\
+\bottomrule
+\end{longtable}
+
+\subsection{Transform pipeline (applied in this exact order)}
+
+\begin{longtable}{@{}p{4.6cm}p{4.2cm}p{6.8cm}@{}}
+\toprule
+\textbf{Transform} & \textbf{Parameter} & \textbf{Note} \\
+\midrule \endhead
+\texttt{ToUndirected()} & --- & released edges are stored one-directional \\
+\texttt{NormalizeData()} & \texttt{normalization.json} & z-scores node features \emph{and} edge weights \\
+\texttt{AddVirtualNode()} & weight 22.5 & inserted \emph{after} normalisation \\
+\bottomrule
+\end{longtable}
+
+\paragraph{Contents of \texttt{normalization.json}.}
+
+\begin{longtable}{@{}p{4.6cm}p{4.2cm}p{6.8cm}@{}}
+\toprule
+\textbf{Key} & \textbf{Value} & \textbf{Note} \\
+\midrule \endhead
+\texttt{edge\_attr.mean} & 18.62691879 & microns, over the pre-training corpus \\
+\texttt{edge\_attr.std} & 12.73480892 & microns \\
+\texttt{x.mean} & 96-vector & one entry per node feature \\
+\texttt{x.std} & 96-vector & \\
+\bottomrule
+\end{longtable}
+
+\newpage
+% =====================================================================
+\section{Self-supervised pre-training}
+\noindent\texttt{src/train/pretrain.py}
+
+\begin{longtable}{@{}p{4.0cm}p{2.8cm}p{8.8cm}@{}}
+\toprule
+\textbf{Flag} & \textbf{Default} & \textbf{Note} \\
+\midrule \endhead
+\multicolumn{3}{@{}l}{\textit{General}}\\
+\texttt{--dataset} & \texttt{TCGA\_BRCA} & \\
+\texttt{--seed} & 0 & \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Paths}}\\
+\texttt{--save\_folder} & \req & \\
+\texttt{--norm\_json\_path} & \req & \\
+\texttt{--metadata\_csv\_path} & \req & \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Model}}\\
+\texttt{--encoder} & \texttt{acm\_gin} & only \texttt{acm\_gin} is implemented \\
+\texttt{--decoder} & \texttt{acm\_gin} & \\
+\texttt{--num\_hidden} & \req & embedding dimension $d$ \\
+\texttt{--num\_layers} & \req & encoder depth \\
+\texttt{--mask\_rate} & \req & paper searched $\{0.50, 0.75\}$ \\
+\texttt{--replace\_rate} & \req & paper searched $\{0.00, 0.10\}$ \\
+\texttt{--drop\_edge\_rate} & 0.0 & \\
+\texttt{--node\_pooling} & \texttt{mean} & \\
+\texttt{--activation} & \texttt{prelu} & \\
+\texttt{--batchnorm} & \texttt{False} & \\
+\texttt{--concat\_hidden} & \texttt{True} & jumping knowledge \\
+\texttt{--loss\_fn} & \texttt{sce} & scaled cosine error \\
+\texttt{--alpha\_l} & 3 & the exponent $\gamma$ in the SCE loss \\
+\texttt{--num\_heads} & 4 & \dead{} architecturally; only asserts \texttt{num\_hidden \% nhead == 0} \\
+\texttt{--num\_out\_heads} & 1 & \dead{} architecturally; same assertion \\
+\texttt{--residual} & \texttt{None} & \dead \\
+\texttt{--attn\_drop} & 0.1 & \dead \\
+\texttt{--in\_drop} & 0.2 & \dead \\
+\texttt{--norm} & \texttt{None} & \dead \\
+\texttt{--negative\_slope} & 0.2 & \dead \\
+\texttt{--dropout} & 0.2 & \dead \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Optimisation}}\\
+\texttt{--optimizer} & \texttt{adam} & \\
+\texttt{--lr} & 0.001 & \\
+\texttt{--weight\_decay} & 0 & \\
+\texttt{--scheduler} & \texttt{False} & no learning-rate schedule by default \\
+\texttt{--max\_epoch} & 100 & same budget as the paper's vision baselines \\
+\texttt{--batch\_size} & 2048 & same as the vision baselines \\
+\texttt{--num\_workers} & 4 & \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Run control}}\\
+\texttt{--train} & \texttt{True} & \\
+\texttt{--load\_model} & \texttt{False} & \\
+\texttt{--resume\_run} & \texttt{False} & \\
+\texttt{--save\_model} & \texttt{True} & \\
+\texttt{--logging} & \texttt{True} & \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Inferred at runtime, not flags}}\\
+\texttt{num\_features} & 96 & read from \texttt{train\_dataset[0].num\_features} \\
+\texttt{num\_edge\_features} & 1 & read from \texttt{train\_dataset[0].edge\_attr.size(1)} \\
+\bottomrule
+\end{longtable}
+
+\paragraph{Masking procedure.} A fraction \texttt{mask\_rate} of nodes is selected.
+Of those, a fraction \texttt{replace\_rate} has its features replaced by another
+node's features; the remaining \texttt{1 - replace\_rate} receives the learnable
+mask token. The virtual node is excluded from masking.
+
+\paragraph{Loss.} Scaled cosine error over masked nodes only:
+\[
+L_{SCE} = \frac{1}{|\tilde{V}|}\sum_{v_i \in \tilde{V}}
+\left(1 - \frac{x_i^\top h_i}{\|x_i\| \cdot \|h_i\|}\right)^{\gamma},
+\qquad \gamma = 3.
+\]
+
+\newpage
+% =====================================================================
+\section{Embedding generation}
+\noindent\texttt{src/train/generate\_embs.py}
+
+Model flags must match the checkpoint. Note that where \texttt{pretrain.py} marks
+a flag \req, this script supplies a concrete default matching the released
+checkpoint.
+
+\begin{longtable}{@{}p{4.0cm}p{2.8cm}p{8.8cm}@{}}
+\toprule
+\textbf{Flag} & \textbf{Default} & \textbf{Note} \\
+\midrule \endhead
+\texttt{--dataset} & \req & \\
+\texttt{--scale} & \req & one of \texttt{cell}, \texttt{patch}, \texttt{slide} \\
+\texttt{--model\_path} & \req & \texttt{weights/graphist.pt} \\
+\texttt{--norm\_json\_path} & \req & \\
+\texttt{--metadata\_csv\_path} & \texttt{None} & required for \texttt{patch} and \texttt{slide} scale \\
+\texttt{--cell\_graphs\_path} & \texttt{None} & required for \texttt{cell} scale \\
+\texttt{--output\_path} & \req & \\
+\texttt{--num\_hidden} & 512 & matches the released checkpoint \\
+\texttt{--num\_layers} & 5 & matches the released checkpoint \\
+\texttt{--encoder} / \texttt{--decoder} & \texttt{acm\_gin} & \\
+\texttt{--mask\_rate} & 0.5 & unused at inference \\
+\texttt{--replace\_rate} & 0.1 & unused at inference \\
+\texttt{--drop\_edge\_rate} & 0.0 & \\
+\texttt{--node\_pooling} & \texttt{mean} & \\
+\texttt{--num\_edge\_features} & 1 & \\
+\texttt{--num\_heads} & 4 & \dead \\
+\texttt{--num\_out\_heads} & 1 & \dead \\
+\texttt{--residual} & \texttt{None} & \dead \\
+\texttt{--attn\_drop} & 0.1 & \dead \\
+\texttt{--in\_drop} & 0.2 & \dead \\
+\texttt{--norm} & \texttt{None} & \dead \\
+\texttt{--negative\_slope} & 0.2 & \dead \\
+\texttt{--batchnorm} & \texttt{False} & \\
+\texttt{--activation} & \texttt{prelu} & \\
+\texttt{--loss\_fn} & \texttt{sce} & \\
+\texttt{--alpha\_l} & 3 & \\
+\texttt{--concat\_hidden} & \texttt{True} & \\
+\texttt{--max\_epoch} & 100 & unused at inference \\
+\texttt{--batch\_size} & 2048 & \textbf{we used 8 for BRACS, 64 for BreakHis} \\
+\texttt{--num\_workers} & 4 & \textbf{we used 0} (see Section~\ref{sec:ours}) \\
+\texttt{--lr} & 0.001 & unused at inference \\
+\texttt{--seed} & 0 & \\
+\bottomrule
+\end{longtable}
+
+\paragraph{Embedding construction by scale.}
+\begin{itemize}\itemsep2pt
+  \item \textbf{Cell:} the node embedding, with the virtual node excluded.
+  \item \textbf{Patch / region:} the mean over nodes. \emph{Includes} the virtual
+        node, unlike the cell path.
+  \item \textbf{Slide:} the mean over nodes per patch, then attention MIL across
+        patches. Also includes the virtual node.
+\end{itemize}
+
+\newpage
+% =====================================================================
+\section{Cell-level evaluation}
+\noindent\texttt{src/evaluate/main\_cell.py}
+
+\begin{longtable}{@{}p{4.0cm}p{2.8cm}p{8.8cm}@{}}
+\toprule
+\textbf{Flag} & \textbf{Default} & \textbf{Note} \\
+\midrule \endhead
+\texttt{--split\_mode} & \req & one of \texttt{csv}, \texttt{folder}, \texttt{group} \\
+\texttt{--emb\_dir} & \texttt{None} & single directory, for \texttt{group} mode \\
+\texttt{--fold\_dirs} & \texttt{None} & one directory per fold, for \texttt{folder} mode \\
+\texttt{--split\_csv\_dir} & \texttt{None} & fold CSVs, for \texttt{csv} mode \\
+\texttt{--num\_folds} & \texttt{None} & auto-detected in \texttt{csv} mode; defaults to 5 in \texttt{group} mode \\
+\texttt{--group\_regex} & \texttt{None} & first capture group becomes the grouping key \\
+\texttt{--tissue\_filter} & \texttt{None} & e.g.\ \texttt{Breast} for the PanNuke breast subset \\
+\texttt{--label\_map} & \texttt{None} & e.g.\ \texttt{nucls\_super} for the 7$\rightarrow$4 mapping \\
+\texttt{--save\_dir} & \req & \\
+\texttt{--seed} & 0 & \\
+\texttt{--C} & 1.0 & inverse regularisation strength \\
+\texttt{--max\_iter} & 2000 & lbfgs iteration cap \\
+\texttt{--class\_weight} & \texttt{balanced} & re-weights classes inversely to frequency \\
+\bottomrule
+\end{longtable}
+
+\paragraph{Probe configuration.} A scikit-learn \texttt{Pipeline}:
+
+\begin{longtable}{@{}p{4.6cm}p{4.2cm}p{6.8cm}@{}}
+\toprule
+\textbf{Step} & \textbf{Setting} & \textbf{Note} \\
+\midrule \endhead
+\texttt{StandardScaler} & defaults & zero mean, unit variance per dimension \\
+\texttt{LogisticRegression} \texttt{solver} & \texttt{lbfgs} & multinomial is the lbfgs default \\
+\quad \texttt{C} & 1.0 & \\
+\quad \texttt{max\_iter} & 2000 & \\
+\quad \texttt{class\_weight} & \texttt{balanced} & \\
+\quad \texttt{random\_state} & 0 & \\
+\bottomrule
+\end{longtable}
+
+\paragraph{Splits actually used.}
+
+\begin{longtable}{@{}p{3.0cm}p{3.4cm}p{9.2cm}@{}}
+\toprule
+\textbf{Dataset} & \textbf{Mode} & \textbf{Configuration} \\
+\midrule \endhead
+PanNuke & \texttt{folder} & the dataset's own three published folds, \texttt{fold\_1..3} \\
+PanNuke Breast & \texttt{folder} & same three folds, with \texttt{--tissue\_filter Breast} \\
+NuCLS & \texttt{group} & \texttt{GroupKFold(n\_splits=5)}, \texttt{--group\_regex '\^{}(TCGA-[A-Z0-9]+)'} \\
+\bottomrule
+\end{longtable}
+
+\paragraph{Why 5 folds for NuCLS.} The NuCLS dataset card documents a
+\texttt{splits/} directory of five train and test fold CSVs, numbered
+\texttt{fold\_1} to \texttt{fold\_5}, each carrying a \texttt{hospital} column.
+The dataset's own protocol is therefore \textbf{5 hospital-based folds}. That
+directory is absent from the
+published repository, so the exact assignment cannot be recovered. We therefore
+matched the fold \emph{count} (5) and the grouping \emph{principle} (hospital) by
+grouping on the TCGA tissue source site, which for TCGA barcodes is the
+contributing institution. This yields \textbf{18 groups} over 1{,}694 graphs.
+
+\begin{longtable}{@{}rrrrp{6.4cm}@{}}
+\toprule
+\textbf{Fold} & \textbf{Train} & \textbf{Test} & \textbf{Sites} & \textbf{Sites held out} \\
+\midrule \endhead
+1 & 1{,}355 & 339 & 2 & A2, GI \\
+2 & 1{,}358 & 336 & 3 & BH, E2, LL \\
+3 & 1{,}357 & 337 & 4 & AN, AO, AQ, D8 \\
+4 & 1{,}353 & 341 & 5 & A1, C8, EW, OL, S3 \\
+5 & 1{,}353 & 341 & 4 & A7, AC, AR, GM \\
+\bottomrule
+\end{longtable}
+
+\noindent Note that \texttt{GroupKFold} is \emph{not} stratified, so rare classes
+can disappear from a fold entirely. This is what happens to the NuCLS ``Other''
+class (587 cells) and is why the released AUROC computation had to be made
+degeneracy-tolerant.
+
+\newpage
+% =====================================================================
+\section{Region- and slide-level evaluation}
+
+\subsection{Region level}
+\noindent\texttt{src/evaluate/main\_patch.py}
+
+\begin{longtable}{@{}p{4.0cm}p{2.8cm}p{8.8cm}@{}}
+\toprule
+\textbf{Flag} & \textbf{Default} & \textbf{Note} \\
+\midrule \endhead
+\texttt{--dataset} & \req & \\
+\texttt{--seed} & 0 & \\
+\texttt{--metadata\_csv} & \req & replaced a \texttt{PATH/TO/...} placeholder \\
+\texttt{--embs\_path} & \req & directory of \texttt{\{sample\_id\}.npy} \\
+\texttt{--save\_dir} & \req & \\
+\bottomrule
+\end{longtable}
+
+\subsection{Slide level and MIL}
+\noindent\texttt{src/evaluate/main\_slide.py}
+
+\begin{longtable}{@{}p{4.0cm}p{2.8cm}p{8.8cm}@{}}
+\toprule
+\textbf{Flag} & \textbf{Default} & \textbf{Note} \\
+\midrule \endhead
+\texttt{--dataset} & \req & \\
+\texttt{--mode} & \req & \\
+\texttt{--classifier} & \texttt{attentive} & one of \texttt{attentive}, \texttt{additive}, \texttt{conjunctive} \\
+\texttt{--input\_dim} & 512 & must match the embedding dimension \\
+\texttt{--mask\_rate} & 0.50 & \\
+\texttt{--replace\_rate} & 0.10 & \\
+\texttt{--label\_path} & \req & \\
+\texttt{--train\_data\_path} & \req & \\
+\texttt{--test\_data\_path} & \req & \\
+\texttt{--project\_dir} & \req & \\
+\texttt{--save\_dir} & \req & \\
+\texttt{--seed} & 0 & \\
+\texttt{--epochs} & 200 & \\
+\texttt{--batch\_size} & 64 & \\
+\texttt{--n\_splits} & 5 & stratified cross-validation on the training set \\
+\texttt{--patience} & 15 & early stopping \\
+\texttt{--delta} & 0.01 & early stopping minimum improvement \\
+\bottomrule
+\end{longtable}
+
+\paragraph{Training configuration, fixed in code.}
+
+\begin{longtable}{@{}p{4.6cm}p{4.2cm}p{6.8cm}@{}}
+\toprule
+\textbf{Component} & \textbf{Setting} & \textbf{Note} \\
+\midrule \endhead
+Loss & \texttt{nn.CrossEntropyLoss()} & on \texttt{bag\_logits} \\
+Optimiser & \texttt{optim.Adam} & \texttt{lr} from the grid \\
+Scheduler & \texttt{StepLR} & \texttt{step\_size = epochs / 10}, \texttt{gamma = 0.5} \\
+Early stopping & \texttt{EarlyStopping} & \texttt{patience=15}, \texttt{delta=0.01} \\
+Model selection & highest mean validation macro F1 & across the 5 CV folds \\
+\bottomrule
+\end{longtable}
+
+\paragraph{MIL hyperparameter grid, as implemented.}
+
+\begin{longtable}{@{}p{4.6cm}p{5.0cm}p{6.0cm}@{}}
+\toprule
+\textbf{Parameter} & \textbf{Search space (code)} & \textbf{Paper's stated range} \\
+\midrule \endhead
+\texttt{attn\_hidden\_dim} & \texttt{[128, 256]} & $\{128, 256\}$ \\
+\texttt{clf\_hidden\_dim} & \texttt{[[], [input\_dim]]} & 1 or 2 classifier layers \\
+\texttt{dropout} & \texttt{[0.2, 0.5]} & $\{0.2, 0.5\}$ \\
+\texttt{lr} & \texttt{[0.001, 0.01]} & $\{0.001, 0.01\}$ \\
+Aggregators & 3 variants & ABMIL, additive, conjunctive \\
+Total per dataset & 16 configurations $\times$ 3 aggregators & \\
+\bottomrule
+\end{longtable}
+
+\noindent\textbf{Redundancy.} Dropout is inserted only when the classifier has a
+hidden layer, and the attention module has none. With \texttt{clf\_hidden\_dim=[]}
+the two dropout values therefore produce identical runs, so \textbf{4 of the 16
+configurations duplicate}, per dataset, per aggregator.
+
+\paragraph{MIL module defaults.} \texttt{attentive\_mil.py}, \texttt{additive\_mil.py},
+\texttt{conjunctive\_mil.py}:
+\texttt{hidden\_dim=()}, \texttt{hidden\_activation=nn.ReLU()}, \texttt{dropout=0.0},
+\texttt{attentive\_function=Sum()}.
+
+\newpage
+% =====================================================================
+\section{The paper's search ranges and baseline settings}
+
+\subsection{Self-supervised pre-training (paper Section 4.2)}
+
+\begin{longtable}{@{}p{5.4cm}p{4.6cm}p{5.4cm}@{}}
+\toprule
+\textbf{Parameter} & \textbf{Range searched} & \textbf{Note} \\
+\midrule \endhead
+Embedding dimension $d$ & $\{512, 768, 1024\}$ & validated following Hou et al. \\
+Masking ratio $r_m$ & $\{0.50, 0.75\}$ & \\
+Replacement ratio $r_r$ & $\{0.00, 0.10\}$ & \\
+Encoder depth & 5 & fixed, not searched \\
+Decoder depth & 1 & fixed, not searched \\
+Epochs & 100 & identical for GrapHist and the vision baselines \\
+Batch size & 2048 & identical for GrapHist and the vision baselines \\
+Hardware & A100 80GB, H200 140GB & \\
+\bottomrule
+\end{longtable}
+
+\subsection{Self-supervised evaluation (paper Appendix C)}
+
+For slide- and region-level tasks, a 5-fold stratified cross-validation on the
+training set selects the MIL head hyperparameters; the configuration with the
+highest mean validation macro F1 is then evaluated on the held-out test set. The
+procedure is repeated for all three aggregators and the best variant reported.
+For cell-level tasks the datasets' own train/test splits are used with logistic
+regression.
+
+\subsection{Supervised baselines (paper Appendix C)}
+
+\begin{longtable}{@{}p{3.6cm}p{2.9cm}p{2.5cm}p{3.1cm}p{3.2cm}@{}}
+\toprule
+\textbf{Task level} & \textbf{GNN hidden} & \textbf{GNN layers} & \textbf{Head hidden} & \textbf{Cross-validation} \\
+\midrule \endhead
+Slide / region & $\{16, 32\}$ & $\{1, 2\}$ & $\{64, 128\}$ attention & 5-fold stratified \\
+Cell & $\{256, 512\}$ & $\{3, 5\}$ & $\{64, 128\}$ MLP & 2-fold PanNuke, 4-fold NuCLS \\
+\bottomrule
+\end{longtable}
+
+\noindent Neither baseline has training code in the released repository, so these
+ranges could not be verified against an implementation.
+
+\subsection{Model sizes (paper Table C.7)}
+
+\begin{longtable}{@{}p{5.0cm}r p{8.2cm}@{}}
+\toprule
+\textbf{Model} & \textbf{Params ($10^6$)} & \textbf{Note} \\
+\midrule \endhead
+Vision baseline 1 & 22.01 & ViT-S/16 backbone \\
+Vision baseline 2 & 47.58 & ViT-S/16 backbone \\
+GrapHist ($d = 512$) & \textbf{9.50} & the released checkpoint \\
+GrapHist ($d = 768$) & 21.12 & \\
+GrapHist ($d = 1024$) & 37.34 & \\
+\bottomrule
+\end{longtable}
+
+\newpage
+% =====================================================================
+\section{Parameters declared but never used}
+\label{sec:dead}
+
+Seven hyperparameters are parsed by \texttt{argparse}, read by
+\texttt{build\_model}, and accepted by \texttt{PreModel.\_\_init\_\_}, but never
+reach the network. The evidence is \texttt{setup\_module}, which is the only
+function that constructs an \texttt{ACM\_GIN\_model} and accepts exactly seven
+arguments:
+
+\begin{verbatim}
+def setup_module(m_type, in_dim, out_dim, num_hidden,
+                 num_layers, activation, batchnorm) -> nn.Module:
+    if m_type == "acm_gin":
+        mod = ACM_GIN_model(int(in_dim), int(out_dim), num_layers,
+                            int(num_hidden), batchnorm, activation=activation)
+\end{verbatim}
+
+\begin{longtable}{@{}p{3.4cm}p{2.4cm}p{9.8cm}@{}}
+\toprule
+\textbf{Flag} & \textbf{Default} & \textbf{Consequence} \\
+\midrule \endhead
+\texttt{--residual} & \texttt{None} & no residual connections are configurable \\
+\texttt{--norm} & \texttt{None} & \texttt{create\_norm} and \texttt{NormLayer} are dead code \\
+\texttt{--negative\_slope} & 0.2 & no effect on any activation \\
+\texttt{--attn\_drop} & 0.1 & no attention dropout \\
+\texttt{--in\_drop} & 0.2 & no input dropout, despite the README suggesting \texttt{--in\_drop 0.2} \\
+\texttt{--dropout} & 0.2 & no dropout anywhere \\
+\texttt{--num\_heads} & 4 & only used in \texttt{assert num\_hidden \% nhead == 0} \\
+\bottomrule
+\end{longtable}
+
+\noindent\textbf{Net effect.} Since \texttt{--batchnorm} also defaults to
+\texttt{False}, GrapHist pre-trains with \textbf{no dropout and no normalisation
+layers of any kind}.
+
+% =====================================================================
+\section{Where the paper and the code disagree}
+\label{sec:vn}
+
+\begin{longtable}{@{}p{3.4cm}p{5.6cm}p{6.6cm}@{}}
+\toprule
+\textbf{Item} & \textbf{Paper} & \textbf{Code} \\
+\midrule \endhead
+Virtual node edge weight & ``set to the mean of all edge weights in the pre-training dataset'' & hardcoded \texttt{22.5}, inserted \emph{after} z-scoring. The correctly scaled value is $(22.5 - 18.627)/12.735 = 0.304$, so the injected value is about $74\times$ too large \\
+Probing & described as ``non-linear probing'' three times & plain \texttt{LogisticRegression}; it is a linear probe \\
+Patch embedding & ``the mean of its cell embeddings'' & means over \emph{all} nodes, including the virtual node \\
+MIL normalisation & implied & computed, written to \texttt{normalization.json}, then discarded; \texttt{\_\_getitem\_\_} returns the raw tensor \\
+\bottomrule
+\end{longtable}
+
+\paragraph{Measured effect of the virtual node weight}, on 300 PanNuke graphs:
+
+\begin{longtable}{@{}p{5.0cm}rrr@{}}
+\toprule
+\textbf{Configuration} & \textbf{deg $\le 0$} & \textbf{$\|$neigh$\|/\|$self$\|$} & \textbf{cos(low, high)} \\
+\midrule \endhead
+As shipped, 22.5 & 0.0\% & 0.080 & $+0.992$ \\
+Naive correction, 0.304 & 57.8\% & 1.009 & $-0.012$ \\
+Gaussian kernel, $\sigma = 25$\,\textmu m & 0.0\% & 0.787 & $+0.320$ \\
+Inverse $1/(1 + d/\mu)$ & 0.0\% & 0.785 & $+0.325$ \\
+Linear decay $1 - d/100$ & 0.0\% & 0.782 & $+0.329$ \\
+\bottomrule
+\end{longtable}
+
+% =====================================================================
+\section{Our environment and the settings we changed}
+\label{sec:ours}
+
+\begin{longtable}{@{}p{4.4cm}p{5.0cm}p{6.2cm}@{}}
+\toprule
+\textbf{Item} & \textbf{Paper} & \textbf{Ours} \\
+\midrule \endhead
+Hardware & A100 80GB, H200 140GB & Apple M3 Pro, 11 cores, 18 GB, CPU only \\
+Python & not stated & 3.13 \\
+PyTorch & not stated & 2.13.0 \\
+PyTorch Geometric & not stated & 2.8.0.post1 \\
+Total compute & 50 GPU-hours pre-training & 13 minutes evaluation \\
+\bottomrule
+\end{longtable}
+
+\paragraph{Settings we changed, and why.}
+
+\begin{longtable}{@{}p{3.6cm}p{2.6cm}p{9.4cm}@{}}
+\toprule
+\textbf{Flag} & \textbf{Our value} & \textbf{Reason} \\
+\midrule \endhead
+\texttt{--num\_workers} & 0 & \texttt{NormalizeData.\_\_init\_\_} builds a \texttt{defaultdict(lambda: ...)}, which is unpicklable, so spawn-based DataLoaders fail \\
+\texttt{--batch\_size} (BRACS) & 8 & 1{,}888 nodes per graph on average, 15{,}496 at maximum; the default 2048 needs tens of gigabytes for the concatenated hidden states \\
+\texttt{--batch\_size} (BreakHis) & 64 & same reason, smaller graphs \\
+\texttt{--group\_regex} & see caption & the NuCLS \texttt{splits/} directory is absent from the repository; we grouped on \texttt{\^{}(TCGA-[A-Z0-9]+)} \\
+\texttt{--num\_folds} & 5 & matches the dataset's documented 5-fold hospital protocol \\
+\texttt{--tissue\_filter} & \texttt{Breast} & no filter shipped for the PanNuke breast subset \\
+\texttt{--label\_map} & \texttt{nucls\_super} & no 7$\rightarrow$4 mapping shipped \\
+\bottomrule
+\end{longtable}
+
+\vspace{10pt}
+\hrule
+\vspace{6pt}
+\noindent{\small Every value in this document was read from the released source at
+\texttt{github.com/ogutsevda/graphist}, from the paper and its appendices, or
+measured directly. Where a value is stated in only one of those places, the
+source is named.}
+
+\end{document}

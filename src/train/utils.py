@@ -30,10 +30,14 @@ class GraphDataset(Dataset):
 
 class NormalizeData(BaseTransform):
     def __init__(self, scale_dict: dict, attrs: List[str] = ["x", "edge_attr"]):
-        tensor_dict = defaultdict(lambda: defaultdict())  # convert the data to tensors
+        # A plain dict keeps this transform picklable, which DataLoader workers
+        # require under the "spawn" start method (macOS and Windows defaults).
+        tensor_dict = {}
         for key, value in scale_dict.items():
-            tensor_dict[key]["mean"] = torch.tensor(value["mean"])
-            tensor_dict[key]["std"] = torch.tensor(value["std"])
+            tensor_dict[key] = {
+                "mean": torch.tensor(value["mean"]),
+                "std": torch.tensor(value["std"]),
+            }
 
         self.tensor_dict = tensor_dict
         self.attrs = attrs
@@ -148,7 +152,9 @@ def create_optimizer(
 
 
 def load_checkpoint(checkpoint_fpath, model, optimizer, just_model=False):
-    checkpoint = torch.load(checkpoint_fpath, weights_only=False)
+    checkpoint = torch.load(
+        checkpoint_fpath, weights_only=False, map_location="cpu"
+    )
     model.load_state_dict(checkpoint["model_state_dict"])
     if just_model:
         return model

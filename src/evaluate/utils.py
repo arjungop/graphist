@@ -7,6 +7,11 @@ import random
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    roc_auc_score,
+    average_precision_score,
+)
 from torch_geometric.data import Dataset, Data
 
 from mil.attentive_mil import AttentiveClassifier
@@ -19,6 +24,52 @@ classifier_dict = {
     "additive": AdditiveClassifier,
     "conjunctive": ConjunctiveClassifier,
 }
+
+
+def macro_ovr_scores(y_true, y_proba, classes):
+    """Macro one-vs-rest AUROC and AUPRC.
+
+    sklearn's multi_class="ovr" requires every class to be present in both the
+    fitted classifier and the evaluation set. Cross-validation folds on
+    imbalanced datasets routinely violate that, so we average the per-class
+    scores over the classes that are well defined in this split. When no class is
+    missing this is identical to sklearn's macro average.
+    """
+    y_true = np.asarray(y_true)
+    y_proba = np.asarray(y_proba)
+    aurocs, auprcs = [], []
+    for j, c in enumerate(classes):
+        pos = (y_true == c).astype(int)
+        if pos.sum() == 0 or pos.sum() == pos.shape[0]:
+            continue
+        aurocs.append(roc_auc_score(pos, y_proba[:, j]))
+        auprcs.append(average_precision_score(pos, y_proba[:, j]))
+    if not aurocs:
+        return float("nan"), float("nan")
+    return float(np.mean(aurocs)), float(np.mean(auprcs))
+
+
+def classification_metrics(y_true, y_pred, y_proba, n_classes):
+    """Macro F1 is computed by the caller; this adds the three metrics the
+    paper reports in Tables D.10-D.12 but that the original script omitted."""
+    return {
+        "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
+        **dict(
+            zip(
+                ("auroc", "auprc"),
+                macro_ovr_scores(y_true, y_proba, list(range(n_classes))),
+            )
+        ),
+    }
+
+
+def resolve_device():
+    """CUDA if present, then Apple MPS, then CPU."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 class EmbeddingsDataset(Dataset):

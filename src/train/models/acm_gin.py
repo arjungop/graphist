@@ -62,7 +62,7 @@ class ACM_GIN(MessagePassing):
         if isinstance(x, Tensor):
             x: OptPairTensor = (x, x)
 
-        # propagate_type: (x: OptPairTensor, edge_attr: OptTensor)
+        # propagate_type: (x: OptPairTensor, edge_weight: OptTensor)
         out = self.propagate(edge_index, x=x, edge_weight=edge_weight, size=size)
 
         deg = scatter(edge_weight, edge_index[1], 0, out.size(0), reduce="sum")

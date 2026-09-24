@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import torch
 import wandb
 import argparse
@@ -36,6 +37,20 @@ def get_args():
 
     # Paths
     parser.add_argument("--save_folder", type=str, required=True)
+    parser.add_argument(
+        "--run_name",
+        type=str,
+        default="graphist",
+        help="Names the checkpoint files. Must differ between arms of a sweep, "
+        "otherwise each arm overwrites the previous one's checkpoint.",
+    )
+
+    # Compute budget. max_steps is what makes a multi-arm sweep comparable:
+    # every arm sees exactly the same number of optimizer steps regardless of how
+    # fast it happens to run. max_seconds is a safety net that checkpoints and
+    # stops so a single arm cannot consume the whole wall-clock allowance.
+    parser.add_argument("--max_steps", type=int, default=None)
+    parser.add_argument("--max_seconds", type=float, default=None)
     parser.add_argument("--norm_json_path", type=str, required=True)
     parser.add_argument("--metadata_csv_path", type=str, required=True)
 
@@ -76,6 +91,17 @@ def get_args():
     parser.add_argument("--resume_run", type=bool, default=False)
     parser.add_argument("--save_model", type=bool, default=True)
     parser.add_argument("--logging", type=bool, default=True)
+    # `--logging` is typed bool, so `--logging False` parses as True and Weights
+    # & Biases can never be turned off from the command line. This flag is the
+    # working override; the original is left alone so existing invocations keep
+    # their behaviour.
+    parser.add_argument("--no_logging", action="store_true")
+    parser.add_argument(
+        "--wandb_dir",
+        type=str,
+        default=None,
+        help="Weights & Biases working directory. Defaults to --save_folder.",
+    )
 
     return parser.parse_args()
 
@@ -96,15 +122,43 @@ def pretrain(
     best_loss=1e8,
     node_pooler="mean",
     killer=None,
+    max_steps=None,
+    max_seconds=None,
 ):
 
     train_loader, val_loader = dataloaders
     best_loss = best_loss
 
+    # Budget state. `step` counts optimizer steps across all epochs so that a
+    # sweep can be equalised on steps rather than on epochs, which is what makes
+    # arms comparable when they run at different throughputs.
+    step = 0
+    budget_start = time.time()
+    budget_exhausted = False
+
+    def budget_spent():
+        if max_steps is not None and step >= max_steps:
+            return "max_steps"
+        if max_seconds is not None and (time.time() - budget_start) >= max_seconds:
+            return "max_seconds"
+        return None
+
     for epoch in range(start_epoch, max_epoch):
+        if budget_exhausted:
+            break
         model.train()
         loss_list = []
         for batch_g in train_loader:
+            reason = budget_spent()
+            if reason is not None:
+                elapsed = time.time() - budget_start
+                print(
+                    f"Compute budget reached ({reason}) after {step} steps "
+                    f"and {elapsed / 3600:.2f} h — stopping."
+                )
+                budget_exhausted = True
+                break
+
             if not killer.kill_now:
                 batch_g = batch_g.to(device)
 
@@ -116,6 +170,7 @@ def pretrain(
                 optimizer.step()
 
                 loss_list.append(loss.item())
+                step += 1
             else:
                 save_checkpoint(
                     os.path.join(save_folder, f"{run_name}_kill_checkpoint.pt"),
@@ -127,6 +182,10 @@ def pretrain(
                 )
                 exit(1)
 
+        # The budget can expire on an epoch's first batch, leaving no losses to
+        # average; skip straight to the final checkpoint rather than emit a nan.
+        if not loss_list:
+            break
         mean_train_loss = np.mean(loss_list)
 
         if scheduler is not None:
@@ -247,10 +306,14 @@ def main(args):
     load_model = args.load_model
     resume_run = args.resume_run
     save_model = args.save_model
-    logs = args.logging
+    logs = args.logging and not args.no_logging
 
     save_folder = args.save_folder
     os.makedirs(save_folder, exist_ok=True)
+
+    wandb_dir = args.wandb_dir if args.wandb_dir is not None else save_folder
+    if logs:
+        os.makedirs(wandb_dir, exist_ok=True)
 
     norm_json_path = args.norm_json_path
     metadata_csv_path = args.metadata_csv_path
@@ -316,8 +379,8 @@ def main(args):
 
     print("Val loader created")
 
-    run_name = "YOUR/RUN/NAME"
-    checkpoint_name = "YOUR/CHECKPOINT/NAME"
+    run_name = args.run_name
+    checkpoint_name = f"{run_name}_checkpoint.pt"
 
     if os.path.isfile(os.path.join(save_folder, f"{run_name}_kill_checkpoint.pt")):
         checkpoint_name = f"{run_name}_kill_checkpoint.pt"
@@ -357,7 +420,7 @@ def main(args):
                     name=run_name,
                     id=run_id,
                     resume="allow",
-                    dir="YOUR/WORKING/DIR",
+                    dir=wandb_dir,
                 )
             else:
                 run_id = wandb.util.generate_id()
@@ -368,7 +431,7 @@ def main(args):
                     config=args,
                     name=run_name,
                     id=run_id,
-                    dir="YOUR/WORKING/DIR",
+                    dir=wandb_dir,
                 )
 
     else:
@@ -382,7 +445,7 @@ def main(args):
                 config=args,
                 name=run_name,
                 id=run_id,
-                dir="YOUR/WORKING/DIR",
+                dir=wandb_dir,
             )
 
     if train:
@@ -402,6 +465,8 @@ def main(args):
             best_loss=best_loss,
             node_pooler=node_pooler,
             killer=killer,
+            max_steps=args.max_steps,
+            max_seconds=args.max_seconds,
         )
 
         if save_model:

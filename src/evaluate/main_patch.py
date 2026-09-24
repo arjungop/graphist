@@ -7,9 +7,9 @@ from tqdm import tqdm
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import StratifiedKFold, cross_validate
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, balanced_accuracy_score
 
-from utils import set_random_seed
+from utils import set_random_seed, macro_ovr_scores
 
 
 def load_embs(emb_dir):
@@ -30,16 +30,10 @@ def manual_standardize(train, test):
     return train_scaled, test_scaled
 
 
-def main(dataset, seed):
+def main(dataset, seed, metadata_csv, embs_path, save_dir):
 
     set_random_seed(seed)
     print("Set random seed to", seed)
-
-    # Define file paths
-    base_path = "PATH/TO/PATCH-LEVEL-DATASETS"
-    embs_path = "PATH/TO/EMBEDDINGS"
-
-    metadata_csv = os.path.join(base_path, "metadata.csv")
 
     # Load embs and metadata
     emb_dict = load_embs(embs_path)
@@ -104,8 +98,17 @@ def main(dataset, seed):
     acc = report_dict["accuracy"]
     f1 = report_dict["macro avg"]["f1-score"]
 
-    print(f"\nAccuracy: {acc:.4f}")
-    print(f"F1 (macro): {f1:.4f}")
+    # Balanced accuracy, AUROC and AUPRC are reported by the paper but were not
+    # computed by the original script.
+    y_proba = clf.predict_proba(X_test_scaled)
+    bal_acc = balanced_accuracy_score(y_test_enc, y_pred_enc)
+    auroc, auprc = macro_ovr_scores(y_test_enc, y_proba, list(clf.classes_))
+
+    print(f"\n  Macro F1          : {f1:.4f}")
+    print(f"  Balanced accuracy : {bal_acc:.4f}")
+    print(f"  AUROC (macro OvR) : {auroc:.4f}")
+    print(f"  AUPRC (macro OvR) : {auprc:.4f}")
+    print(f"  Accuracy          : {acc:.4f}")
 
     # Save results
     results = {
@@ -119,11 +122,14 @@ def main(dataset, seed):
         "test_set": {
             "accuracy": round(acc, 4),
             "f1_macro": round(f1, 4),
+            "balanced_accuracy": round(bal_acc, 4),
+            "auroc_macro_ovr": round(auroc, 4),
+            "auprc_macro_ovr": round(auprc, 4),
         },
     }
 
-    out_path = "PATH/TO/RESULTS"
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    os.makedirs(save_dir, exist_ok=True)
+    out_path = os.path.join(save_dir, "test_metrics.json")
     with open(out_path, "w") as f:
         json.dump(results, f, indent=4)
 
@@ -134,5 +140,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, required=True)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--metadata_csv",
+        type=str,
+        required=True,
+        help="CSV with sample_id, label and split columns.",
+    )
+    parser.add_argument(
+        "--embs_path", type=str, required=True, help="Directory of {sample_id}.npy"
+    )
+    parser.add_argument("--save_dir", type=str, required=True)
     args = parser.parse_args()
-    main(args.dataset, args.seed)
+    main(args.dataset, args.seed, args.metadata_csv, args.embs_path, args.save_dir)

@@ -1,0 +1,15 @@
+.DS_Store
+**/.DS_Store
+__pycache__/
+*.pyc
+*.log
+.serena/
+src.orig.bak/
+
+# large weights / generated graph datasets (see README for source links)
+weights/
+graph-bracs/
+graph-breakhis/
+graph-nucls/
+graph-pannuke/
+graph-pannuke.zip

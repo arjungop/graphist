@@ -1,4 +1,5 @@
 import os
+import re
 import glob
 import json
 import argparse
@@ -30,10 +31,11 @@ def parse_arguments():
     parser.add_argument(
         "--split_mode",
         type=str,
-        choices=["csv", "folder"],
+        choices=["csv", "folder", "group"],
         required=True,
         help="'csv': single emb dir + fold CSVs (NuCLS). "
-        "'folder': separate fold directories (PanNuke).",
+        "'folder': separate fold directories (PanNuke). "
+        "'group': single emb dir, grouped k-fold via --group_regex.",
     )
 
     # csv mode args
@@ -66,6 +68,28 @@ def parse_arguments():
         default=None,
         help="Number of folds (auto-detected if not set)",
     )
+    parser.add_argument(
+        "--tissue_filter",
+        type=str,
+        default=None,
+        help="Keep only files whose basename starts with this prefix, e.g. 'Breast' "
+        "for the PanNuke breast-only subset reported in Table 5.",
+    )
+    parser.add_argument(
+        "--label_map",
+        type=str,
+        default=None,
+        choices=["nucls_super"],
+        help="Aggregate fine-grained labels into a coarser set. 'nucls_super' "
+        "collapses the 7 NuCLS main classes into the 4 super classes.",
+    )
+    parser.add_argument(
+        "--group_regex",
+        type=str,
+        default=None,
+        help="With --split_mode group: regex whose first capture group extracts a "
+        "grouping key (e.g. a slide or hospital id) from each filename.",
+    )
     parser.add_argument("--save_dir", type=str, required=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--C", type=float, default=1.0)
@@ -75,13 +99,76 @@ def parse_arguments():
     return parser.parse_args()
 
 
+# ---------- Metrics ----------
+
+
+def macro_ovr_scores(y_true, y_proba, clf_classes):
+    """Macro one-vs-rest AUROC and AUPRC that tolerate degenerate folds.
+
+    sklearn's built-in multi_class="ovr" requires every class to be present in
+    both the training set (so it has a probability column) and the test set.
+    Grouped or hospital-based folds break that assumption for rare classes -- in
+    NuCLS, "Other" (587 cells) and "Tumor (mitotic)" (216 cells) are absent from
+    whole folds. We therefore average the per-class scores over the classes that
+    are well defined in this fold, which is exactly what sklearn's macro average
+    computes when no class is missing.
+    """
+    aurocs, auprcs = [], []
+    for j, c in enumerate(clf_classes):
+        pos = (y_true == c).astype(int)
+        if pos.sum() == 0 or pos.sum() == pos.shape[0]:
+            continue
+        aurocs.append(roc_auc_score(pos, y_proba[:, j]))
+        auprcs.append(average_precision_score(pos, y_proba[:, j]))
+    if not aurocs:
+        return float("nan"), float("nan")
+    return float(np.mean(aurocs)), float(np.mean(auprcs))
+
+
+# ---------- Label maps ----------
+
+# NuCLS ships only the 7-class "main" labels. The paper also reports the 4-class
+# "super" task, which the NuCLS authors define by merging main classes. Verified
+# against Figure A.6 of the paper: this mapping reproduces all four super-class
+# counts exactly (23369 / 17261 / 10893 / 587).
+NUCLS_SUPER = {
+    6: 0,  # Tumor (non-mitotic) -> Tumor Any
+    5: 0,  # Tumor (mitotic)     -> Tumor Any
+    0: 1,  # Lymphocyte          -> sTIL
+    4: 1,  # Plasma cell         -> sTIL
+    2: 2,  # Non-TIL/Non-MQ str. -> Non-TIL stromal
+    1: 2,  # Macrophage          -> Non-TIL stromal
+    3: 3,  # Other               -> Other
+}
+
+LABEL_MAPS = {"nucls_super": NUCLS_SUPER}
+
+
+def apply_label_map(y, name):
+    if name is None:
+        return y
+    mapping = LABEL_MAPS[name]
+    out = np.empty_like(y)
+    for src, dst in mapping.items():
+        out[y == src] = dst
+    return out
+
+
+def filter_paths(paths, tissue_filter):
+    if tissue_filter is None:
+        return paths
+    return [p for p in paths if os.path.basename(p).startswith(tissue_filter)]
+
+
 # ---------- Loading helpers ----------
 
 
-def load_cell_embeddings_from_dir(emb_dir):
+def load_cell_embeddings_from_dir(emb_dir, tissue_filter=None):
     """Load all .npz files from a directory."""
     xs, ys = [], []
-    all_npz_files = sorted(glob.glob(os.path.join(emb_dir, "*.npz")))
+    all_npz_files = filter_paths(
+        sorted(glob.glob(os.path.join(emb_dir, "*.npz"))), tissue_filter
+    )
 
     for fp in tqdm(all_npz_files, desc=f"Loading {emb_dir}"):
         data = np.load(fp)
@@ -157,7 +244,6 @@ def train_and_eval_cell_level(
                 "logreg",
                 LogisticRegression(
                     solver="lbfgs",
-                    multi_class="multinomial",
                     C=C,
                     max_iter=max_iter,
                     class_weight=class_weight,
@@ -178,22 +264,8 @@ def train_and_eval_cell_level(
     balanced_acc = balanced_accuracy_score(y_test, y_pred)
     report_dict = classification_report(y_test, y_pred, digits=4, output_dict=True)
 
-    # AUROC & AUPRC
-    if n_classes == 2:
-        auroc = roc_auc_score(y_test, y_proba[:, 1])
-        auprc = average_precision_score(y_test, y_proba[:, 1])
-    else:
-        auroc = roc_auc_score(
-            y_test,
-            y_proba,
-            multi_class="ovr",
-            average="macro",
-        )
-        auprc = average_precision_score(
-            y_test,
-            y_proba,
-            average="macro",
-        )
+    # AUROC & AUPRC (macro one-vs-rest, robust to classes missing from a fold)
+    auroc, auprc = macro_ovr_scores(y_test, y_proba, clf.named_steps["logreg"].classes_)
 
     # Print results
     print(f"  Accuracy          : {acc:.4f}")
@@ -201,6 +273,14 @@ def train_and_eval_cell_level(
     print(f"  Balanced Accuracy : {balanced_acc:.4f}")
     print(f"  AUROC (macro OvR) : {auroc:.4f}")
     print(f"  AUPRC (macro OvR) : {auprc:.4f}")
+
+    seen = set(clf.named_steps["logreg"].classes_.tolist())
+    missing_train = sorted(set(classes.tolist()) - seen)
+    missing_test = sorted(set(classes.tolist()) - set(np.unique(y_test).tolist()))
+    if missing_train:
+        print(f"  NOTE: classes absent from train split: {missing_train}")
+    if missing_test:
+        print(f"  NOTE: classes absent from test split : {missing_test}")
 
     cm_test = confusion_matrix(y_test, y_pred, labels=classes)
     print(f"  Confusion matrix:\n{cm_test}\n")
@@ -214,6 +294,8 @@ def train_and_eval_cell_level(
         "auroc_macro_ovr": float(auroc),
         "auprc_macro_ovr": float(auprc),
         "classification_report": report_dict,
+        "classes_missing_from_train": [int(c) for c in missing_train],
+        "classes_missing_from_test": [int(c) for c in missing_test],
     }
 
     return result
@@ -261,6 +343,70 @@ def run_csv_mode(args):
     return results
 
 
+def run_group_mode(args):
+    """Grouped k-fold over a single embedding directory.
+
+    Used for NuCLS: the dataset card documents a `splits/` directory of fold
+    CSVs, but it is not present in the published repository, so the paper's exact
+    fold assignment cannot be recovered. NuCLS folds are hospital-based, and for
+    TCGA slides the two-character tissue source site code is the hospital, so we
+    group on that and report it as an approximation of the original split.
+    """
+    from sklearn.model_selection import GroupKFold
+
+    assert args.emb_dir is not None
+    assert args.group_regex is not None
+    num_folds = args.num_folds or 5
+
+    paths = filter_paths(
+        sorted(glob.glob(os.path.join(args.emb_dir, "*.npz"))), args.tissue_filter
+    )
+    pat = re.compile(args.group_regex)
+
+    xs, ys, gs = [], [], []
+    for fp in tqdm(paths, desc="Loading embs"):
+        m = pat.search(os.path.basename(fp))
+        if m is None:
+            raise ValueError(f"--group_regex did not match {os.path.basename(fp)}")
+        data = np.load(fp)
+        emb, lbl = np.asarray(data["embedding"]), np.asarray(data["labels"])
+        if lbl.shape[0] != emb.shape[0]:
+            raise ValueError(
+                f"Label length {lbl.shape[0]} != num cells {emb.shape[0]} in {fp}"
+            )
+        xs.append(emb)
+        ys.append(lbl)
+        gs.append(np.full(emb.shape[0], m.group(1)))
+
+    X = np.vstack(xs)
+    y = apply_label_map(np.concatenate(ys), args.label_map)
+    groups = np.concatenate(gs)
+    print(
+        f"Running {num_folds}-fold GroupKFold (group mode) over "
+        f"{len(paths)} patches, {X.shape[0]:,} cells, "
+        f"{len(np.unique(groups))} groups, {len(np.unique(y))} classes\n"
+    )
+
+    results = []
+    for i, (tr, te) in enumerate(GroupKFold(n_splits=num_folds).split(X, y, groups), 1):
+        print(f"--- Fold {i}/{num_folds} ---")
+        result = train_and_eval_cell_level(
+            X[tr],
+            y[tr],
+            X[te],
+            y[te],
+            C=args.C,
+            max_iter=args.max_iter,
+            class_weight=args.class_weight,
+            random_state=args.seed,
+        )
+        result["fold"] = i
+        result["n_test_groups"] = int(len(np.unique(groups[te])))
+        results.append(result)
+
+    return results
+
+
 def run_folder_mode(args):
     assert args.fold_dirs is not None and len(args.fold_dirs) >= 2
     num_folds = len(args.fold_dirs)
@@ -276,13 +422,14 @@ def run_folder_mode(args):
         # Load training data from all other folds
         X_tr_list, y_tr_list = [], []
         for d in train_dirs:
-            X_f, y_f = load_cell_embeddings_from_dir(d)
+            X_f, y_f = load_cell_embeddings_from_dir(d, args.tissue_filter)
             X_tr_list.append(X_f)
             y_tr_list.append(y_f)
         X_train = np.vstack(X_tr_list)
-        y_train = np.concatenate(y_tr_list)
+        y_train = apply_label_map(np.concatenate(y_tr_list), args.label_map)
 
-        X_test, y_test = load_cell_embeddings_from_dir(test_dir)
+        X_test, y_test = load_cell_embeddings_from_dir(test_dir, args.tissue_filter)
+        y_test = apply_label_map(y_test, args.label_map)
 
         result = train_and_eval_cell_level(
             X_train,
@@ -312,6 +459,8 @@ def main():
 
     if args.split_mode == "csv":
         results = run_csv_mode(args)
+    elif args.split_mode == "group":
+        results = run_group_mode(args)
     else:
         results = run_folder_mode(args)
 
@@ -322,13 +471,22 @@ def main():
         json.dump(results, f, indent=4)
 
     # Print summary
-    accs = [r["accuracy"] for r in results]
-    f1s = [r["macro_f1"] for r in results]
-    print(f"\n===== SUMMARY =====")
-    print(f"  Mean accuracy : {np.mean(accs):.4f} ± {np.std(accs):.4f}")
-    print(f"  Mean macro F1 : {np.mean(f1s):.4f} ± {np.std(f1s):.4f}")
+    print("\n===== SUMMARY =====")
+    summary = {}
+    for key, label in [
+        ("macro_f1", "Macro F1"),
+        ("balanced_accuracy", "Balanced accuracy"),
+        ("auroc_macro_ovr", "AUROC"),
+        ("auprc_macro_ovr", "AUPRC"),
+        ("accuracy", "Accuracy"),
+    ]:
+        v = np.array([r[key] for r in results]) * 100
+        summary[key] = {"mean": float(v.mean()), "std": float(v.std())}
+        print(f"  {label:<18} {v.mean():6.2f} +/- {v.std():.2f}")
+    with open(os.path.join(args.save_dir, "summary.json"), "w") as f:
+        json.dump(summary, f, indent=4)
     print(f"  Results saved to {results_path}")
-    print(f"===================\n")
+    print("===================\n")
 
 
 if __name__ == "__main__":

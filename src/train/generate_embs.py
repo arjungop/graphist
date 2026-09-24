@@ -210,8 +210,15 @@ def generate_embeddings_cell(
                 end = int(batch.ptr[i + 1].item())
                 emb_i = h[start : end - 1]  # remove the virtual node
 
+                # `ptr` indexes nodes and therefore counts the virtual node that
+                # AddVirtualNode appended to every graph, but `labels` does not.
+                # Graph i is preceded by exactly i virtual nodes, so the label
+                # offset has to be shifted back by i.
+                lab_start = start - i
+                lab_end = lab_start + (end - start - 1)
+
                 embedding = emb_i.detach().cpu().numpy()
-                labels = batch.labels[start : end - 1].detach().cpu().numpy()
+                labels = batch.labels[lab_start:lab_end].detach().cpu().numpy()
                 np.savez(out_path, embedding=embedding, labels=labels)
 
 
@@ -225,7 +232,11 @@ def main():
     print("=========================================\n")
 
     # Device & seeding
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        "cuda"
+        if torch.cuda.is_available()
+        else ("mps" if torch.backends.mps.is_available() else "cpu")
+    )
     print(device)
 
     g = torch.Generator()
